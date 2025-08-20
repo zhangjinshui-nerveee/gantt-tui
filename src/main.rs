@@ -706,9 +706,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     ProjectField::StartDate => "Start Date: ".len(),
                     ProjectField::WeekToShow => "Week to Show: ".len(),
                 };
-                frame.set_cursor(
-                    table_area.x + 1 + (x_offset + app.input_buffer.len()) as u16,
-                    table_area.y + y_offset,
+                frame.set_cursor_position(
+                    (table_area.x + 1 + (x_offset + app.input_buffer.len()) as u16,
+                    table_area.y + y_offset),
                 );
             }
             FocusArea::Tasks => {
@@ -743,7 +743,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                         _ => {}
                     }
                     let cursor_y = tasks_area.y + selected_row_index as u16;
-                    frame.set_cursor(cursor_x, cursor_y);
+                    frame.set_cursor_position((cursor_x, cursor_y));
                 }
             }
         }
@@ -946,7 +946,7 @@ fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help_text = match app.input_mode {
-        InputMode::Normal => "Nav (j/k/h/l) | (a)dd | (D)elete | (t)oday | (u)ndo | (Ctrl-r)edo | (Enter) edit | (Ctrl-s) save | (q)uit",
+        InputMode::Normal => "Nav (j/k/h/l) | Add (a) | Del (D) | Today (t) | Undo (u) | Redo (Ctrl-r) | Edit (Enter) | Save (Ctrl-s) | Quit (q)",
         InputMode::Editing => "Editing... (Enter) save | (Esc) cancel | (Ctrl-w) del word",
     };
     
