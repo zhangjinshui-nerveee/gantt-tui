@@ -97,6 +97,7 @@ struct App {
     gantt_area_width: u16,
     history: Vec<ProjectState>,
     redo_history: Vec<ProjectState>,
+    current_file_path: Option<String>,
 }
 
 impl App {
@@ -118,16 +119,22 @@ impl App {
             gantt_area_width: 0,
             history: vec![],
             redo_history: vec![],
+            current_file_path: None,
         };
 
-        let load_result = app.load_project(project_file.clone());
-        if load_result.is_err() {
-            let msg = format!("Failed to load project from {}. Starting with default tasks.", project_file.unwrap_or("project.json".to_string()));
-            app.status_message = msg;
-            app.load_default_tasks();
+        if let Some(file) = project_file {
+            let load_result = app.load_project(Some(file.clone()));
+            if load_result.is_err() {
+                let msg = format!("Failed to load project from {}. Starting with default tasks.", file);
+                app.status_message = msg;
+                app.load_default_tasks();
+            } else {
+                let msg = format!("Project loaded successfully from {}.", file);
+                app.status_message = msg;
+                app.current_file_path = Some(file);
+            }
         } else {
-            let msg = format!("Project loaded successfully from {}.", project_file.unwrap_or("project.json".to_string()));
-            app.status_message = msg;
+            app.load_default_tasks();
         }
         
         if !app.tasks.is_empty() {
@@ -397,7 +404,7 @@ fn handle_events(app: &mut App) -> io::Result<()> {
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
-            KeyCode::Char('s') => { app.save_project(None).unwrap_or_else(|_| app.status_message = "Failed to save project.".into()); },
+            KeyCode::Char('s') => { app.save_project(app.current_file_path.clone()).unwrap_or_else(|_| app.status_message = "Failed to save project.".into()); },
             KeyCode::Char('r') => app.redo(),
             _ => {}
         }
