@@ -10,6 +10,9 @@
 - [x] when add a task, add after the current line that cursor is in, update all ids and dependencies based on their locations
 - [x] change delete to be capital D
 - [x] Name column should be autofit their width without violating the minimum width of gantt chart
-- [ ] how to make this a command line app? file save and load automatically
-- [ ] if today has content, highlight the lines
+- [x] how to make this a command line app? file save and load automatically
+- [x] if today has content, highlight the lines
 - [x] make the progress bar less dense
+
+bugs:
+- [ ] when move a line to the top of the list with ctrl-k, doing it again will panick the program.
