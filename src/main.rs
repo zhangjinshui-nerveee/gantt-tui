@@ -41,12 +41,15 @@ struct ProjectData {
     tasks: Vec<Task>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct AllProjectsData {
+    projects: Vec<ProjectData>,
+    active_project_index: usize,
+}
+
 #[derive(Clone)]
 struct ProjectState {
-    project_name: String,
-    project_start_date: NaiveDate,
-    week_to_show: u32,
-    tasks: Vec<Task>,
+    project_data: ProjectData,
 }
 
 // --- APPLICATION STATE ---
@@ -81,10 +84,8 @@ enum FocusArea {
 }
 
 struct App {
-    project_name: String,
-    tasks: Vec<Task>,
-    project_start_date: NaiveDate,
-    week_to_show: u32,
+    all_projects: AllProjectsData,
+    current_project_index: usize,
     today: NaiveDate,
     table_state: TableState,
     input_mode: InputMode,
@@ -97,16 +98,18 @@ struct App {
     gantt_area_width: u16,
     history: Vec<ProjectState>,
     redo_history: Vec<ProjectState>,
-    current_file_path: Option<String>,
+    current_file_path: String, // Always "projects.json"
+
 }
 
 impl App {
-    fn new(project_file: Option<String>) -> Self {
+    fn new() -> Self {
         let mut app = App {
-            project_name: "New Project".to_string(),
-            tasks: vec![],
-            project_start_date: NaiveDate::from_ymd_opt(2024, 8, 1).unwrap(),
-            week_to_show: 0,
+            all_projects: AllProjectsData {
+                projects: vec![],
+                active_project_index: 0,
+            },
+            current_project_index: 0,
             today: Local::now().date_naive(),
             table_state: TableState::default(),
             input_mode: InputMode::Normal,
@@ -119,25 +122,20 @@ impl App {
             gantt_area_width: 0,
             history: vec![],
             redo_history: vec![],
-            current_file_path: None,
+            current_file_path: "projects.json".to_string(),
         };
 
-        if let Some(file) = project_file {
-            let load_result = app.load_project(Some(file.clone()));
-            if load_result.is_err() {
-                let msg = format!("Failed to load project from {}. Starting with default tasks.", file);
-                app.status_message = msg;
-                app.load_default_tasks();
-            } else {
-                let msg = format!("Project loaded successfully from {}.", file);
-                app.status_message = msg;
-                app.current_file_path = Some(file);
-            }
+        let load_result = app.load_all_projects();
+        if load_result.is_err() {
+            let msg = format!("Failed to load projects from {}. Starting with a new default project.", app.current_file_path);
+            app.status_message = msg;
+            app.add_default_project();
         } else {
-            app.load_default_tasks();
+            let msg = format!("Projects loaded successfully from {}.", app.current_file_path);
+            app.status_message = msg;
         }
         
-        if !app.tasks.is_empty() {
+        if !app.get_current_project().tasks.is_empty() {
             app.table_state.select(Some(0));
             app.focus_area = FocusArea::Tasks;
         } else {
@@ -148,40 +146,96 @@ impl App {
         app
     }
 
-    fn load_default_tasks(&mut self) {
-        self.add_task(Task { id: 0, name: "Requirement Gathering".into(), assigned_to: "Alice".into(), duration: 5, progress: 100, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
-        self.add_task(Task { id: 0, name: "UI/UX Design".into(), assigned_to: "Bob".into(), duration: 7, progress: 50, dependencies: vec![1], manual_start_date: None, start_date: None, end_date: None });
+    fn add_default_project(&mut self) {
+        let mut default_project = ProjectData {
+            project_name: "New Project".to_string(),
+            project_start_date: NaiveDate::from_ymd_opt(2024, 8, 1).unwrap(),
+            week_to_show: 0,
+            tasks: vec![],
+        };
+        default_project.tasks.push(Task { id: 0, name: "Requirement Gathering".into(), assigned_to: "Alice".into(), duration: 5, progress: 100, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
+        default_project.tasks.push(Task { id: 0, name: "UI/UX Design".into(), assigned_to: "Bob".into(), duration: 7, progress: 50, dependencies: vec![1], manual_start_date: None, start_date: None, end_date: None });
+        
+        self.all_projects.projects.push(default_project);
+        self.current_project_index = self.all_projects.projects.len() - 1;
         self.history.clear();
+        self.redo_history.clear();
+    }
+
+    fn add_new_project(&mut self) {
+        self.save_all_projects().unwrap_or_else(|_| self.status_message = "Failed to save current project before creating new one.".into());
+        let new_project_name = format!("New Project {}", self.all_projects.projects.len() + 1);
+        let new_project = ProjectData {
+            project_name: new_project_name.clone(),
+            project_start_date: Local::now().date_naive(),
+            week_to_show: 0,
+            tasks: vec![],
+        };
+        self.all_projects.projects.push(new_project);
+        self.current_project_index = self.all_projects.projects.len() - 1;
+        self.history.clear();
+        self.redo_history.clear();
+        self.recalculate_schedule();
+        self.table_state.select(None); // Deselect any task
+        self.focus_area = FocusArea::Project(ProjectField::Name); // Focus on new project name
+        self.status_message = format!("New project '{}' created.", new_project_name);
+    }
+
+    fn get_current_project(&self) -> &ProjectData {
+        &self.all_projects.projects[self.current_project_index]
+    }
+
+    fn get_current_project_mut(&mut self) -> &mut ProjectData {
+        &mut self.all_projects.projects[self.current_project_index]
     }
 
     fn add_task(&mut self, mut task: Task) {
         self.save_state_for_undo();
-        task.id = self.next_task_id;
-        self.next_task_id += 1;
+        let next_id = self.next_task_id;
+        task.id = next_id;
 
-        if let Some(selected_index) = self.table_state.selected() {
-            self.tasks.insert(selected_index + 1, task);
+        let selected_index = self.table_state.selected(); // Get selected_index before mutable borrow
+        let current_project = self.get_current_project_mut();
+        if let Some(idx) = selected_index {
+            current_project.tasks.insert(idx + 1, task);
         } else {
-            self.tasks.push(task);
+            current_project.tasks.push(task);
         }
-
+        // next_task_id is updated in recalculate_schedule
         self.remap_ids_and_dependencies();
     }
 
     fn delete_selected_task(&mut self) {
         if let FocusArea::Tasks = self.focus_area {
             if let Some(selected_index) = self.table_state.selected() {
-                if selected_index < self.tasks.len() {
-                    self.save_state_for_undo();
-                    self.tasks.remove(selected_index);
-                    if selected_index > 0 && selected_index >= self.tasks.len() {
-                        self.table_state.select(Some(self.tasks.len() - 1));
-                    } else if self.tasks.is_empty() {
-                        self.table_state.select(None);
-                        self.focus_area = FocusArea::Project(ProjectField::WeekToShow);
+                self.save_state_for_undo();
+                let mut new_selected_index = None;
+                let mut new_focus_area = self.focus_area;
+
+                { 
+                    let current_project = self.get_current_project_mut();
+                    if selected_index < current_project.tasks.len() {
+                        current_project.tasks.remove(selected_index);
+                        if selected_index > 0 && current_project.tasks.len() > 0 && selected_index >= current_project.tasks.len() {
+                            new_selected_index = Some(current_project.tasks.len() - 1);
+                        } else if current_project.tasks.is_empty() {
+                            new_selected_index = None;
+                            new_focus_area = FocusArea::Project(ProjectField::WeekToShow);
+                        } else if selected_index < current_project.tasks.len() {
+                            new_selected_index = Some(selected_index);
+                        } else if current_project.tasks.len() > 0 {
+                            new_selected_index = Some(current_project.tasks.len() - 1);
+                        }
                     }
-                    self.remap_ids_and_dependencies();
+                } 
+
+                if let Some(idx) = new_selected_index {
+                    self.table_state.select(Some(idx));
+                } else {
+                    self.table_state.select(None);
                 }
+                self.focus_area = new_focus_area;
+                self.remap_ids_and_dependencies();
             }
         }
     }
@@ -189,12 +243,16 @@ impl App {
     fn move_task_up(&mut self) {
         if let FocusArea::Tasks = self.focus_area {
             if let Some(selected_index) = self.table_state.selected() {
-                if selected_index > 0 {
-                    self.save_state_for_undo();
-                    self.tasks.swap(selected_index, selected_index - 1);
-                    self.table_state.select(Some(selected_index - 1));
-                    self.remap_ids_and_dependencies();
-                }
+                self.save_state_for_undo();
+                let new_selected_index = selected_index - 1;
+                { 
+                    let current_project = self.get_current_project_mut();
+                    if selected_index > 0 {
+                        current_project.tasks.swap(selected_index, new_selected_index);
+                    }
+                } 
+                self.table_state.select(Some(new_selected_index));
+                self.remap_ids_and_dependencies();
             }
         }
     }
@@ -202,25 +260,30 @@ impl App {
     fn move_task_down(&mut self) {
         if let FocusArea::Tasks = self.focus_area {
             if let Some(selected_index) = self.table_state.selected() {
-                if selected_index < self.tasks.len() - 1 {
-                    self.save_state_for_undo();
-                    self.tasks.swap(selected_index, selected_index + 1);
-                    self.table_state.select(Some(selected_index + 1));
-                    self.remap_ids_and_dependencies();
-                }
+                self.save_state_for_undo();
+                let new_selected_index = selected_index + 1;
+                { 
+                    let current_project = self.get_current_project_mut();
+                    if selected_index < current_project.tasks.len() - 1 {
+                        current_project.tasks.swap(selected_index, new_selected_index);
+                    }
+                } 
+                self.table_state.select(Some(new_selected_index));
+                self.remap_ids_and_dependencies();
             }
         }
     }
 
     fn remap_ids_and_dependencies(&mut self) {
-        let id_map: HashMap<u32, u32> = self.tasks
+        let current_project = self.get_current_project_mut();
+        let id_map: HashMap<u32, u32> = current_project.tasks
             .iter()
             .enumerate()
             .map(|(i, task)| (task.id, (i + 1) as u32))
             .collect();
 
         let mut new_tasks = Vec::new();
-        for (i, old_task) in self.tasks.iter().enumerate() {
+        for (i, old_task) in current_project.tasks.iter().enumerate() {
             let mut new_task = old_task.clone();
             new_task.id = (i + 1) as u32;
             
@@ -232,15 +295,17 @@ impl App {
             new_tasks.push(new_task);
         }
 
-        self.tasks = new_tasks;
+        current_project.tasks = new_tasks;
         self.recalculate_schedule();
     }
 
     fn recalculate_schedule(&mut self) {
-        self.next_task_id = self.tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        let task_map: HashMap<u32, Task> = self.tasks.iter().map(|t| (t.id, t.clone())).collect();
+        let next_id = self.get_current_project().tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        self.next_task_id = next_id;
+        let current_project = self.get_current_project_mut();
+        let task_map: HashMap<u32, Task> = current_project.tasks.iter().map(|t| (t.id, t.clone())).collect();
         let mut calculated_tasks: HashMap<u32, Task> = HashMap::new();
-        let mut tasks_to_process: Vec<u32> = self.tasks.iter().map(|t| t.id).collect();
+        let mut tasks_to_process: Vec<u32> = current_project.tasks.iter().map(|t| t.id).collect();
         
         let mut iterations = 0;
         while !tasks_to_process.is_empty() && iterations < 100 {
@@ -255,11 +320,11 @@ impl App {
                             .filter_map(|dep_id| calculated_tasks.get(dep_id))
                             .filter_map(|dep| dep.end_date)
                             .max();
-                        updated_task.start_date = Some(max_dep_end_date.map_or(self.project_start_date, |d| d + Duration::days(1)));
+                        updated_task.start_date = Some(max_dep_end_date.map_or(current_project.project_start_date, |d| d + Duration::days(1)));
                     } else if let Some(manual_date) = task.manual_start_date {
                         updated_task.start_date = Some(manual_date);
                     } else {
-                        updated_task.start_date = Some(self.project_start_date);
+                        updated_task.start_date = Some(current_project.project_start_date);
                     }
                     updated_task.end_date = updated_task.start_date.map(|d| d + Duration::days(updated_task.duration.max(1) - 1));
                     calculated_tasks.insert(*task_id, updated_task);
@@ -269,7 +334,7 @@ impl App {
             iterations += 1;
         }
 
-        for task in &mut self.tasks {
+        for task in &mut current_project.tasks {
             if let Some(calculated) = calculated_tasks.get(&task.id) {
                 task.start_date = calculated.start_date;
                 task.end_date = calculated.end_date;
@@ -280,30 +345,21 @@ impl App {
         }
     }
 
-    fn save_project(&mut self, file_name: Option<String>) -> io::Result<()> {
-        let project_data = ProjectData {
-            project_name: self.project_name.clone(),
-            project_start_date: self.project_start_date,
-            week_to_show: self.week_to_show,
-            tasks: self.tasks.clone(),
-        };
-        let json_data = serde_json::to_string_pretty(&project_data)?;
-        let path = file_name.unwrap_or("project.json".to_string());
-        fs::write(&path, json_data)?;
-        self.status_message = format!("Project saved successfully to {}!", path);
+    fn save_all_projects(&mut self) -> io::Result<()> {
+        self.all_projects.active_project_index = self.current_project_index;
+        let json_data = serde_json::to_string_pretty(&self.all_projects)?;
+        fs::write(&self.current_file_path, json_data)?;
+        self.status_message = format!("All projects saved successfully to {}!", self.current_file_path);
         Ok(())
     }
 
-    fn load_project(&mut self, file_name: Option<String>) -> io::Result<()> {
-        let path_str = file_name.unwrap_or("project.json".to_string());
-        let path = Path::new(&path_str);
+    fn load_all_projects(&mut self) -> io::Result<()> {
+        let path = Path::new(&self.current_file_path);
         if path.exists() {
             let json_data = fs::read_to_string(path)?;
-            let project_data: ProjectData = serde_json::from_str(&json_data)?;
-            self.project_name = project_data.project_name;
-            self.project_start_date = project_data.project_start_date;
-            self.week_to_show = project_data.week_to_show;
-            self.tasks = project_data.tasks;
+            let all_projects: AllProjectsData = serde_json::from_str(&json_data)?;
+            self.all_projects = all_projects;
+            self.current_project_index = self.all_projects.active_project_index;
             self.history.clear();
             self.redo_history.clear();
             Ok(())
@@ -314,10 +370,7 @@ impl App {
 
     fn save_state_for_undo(&mut self) {
         self.history.push(ProjectState {
-            project_name: self.project_name.clone(),
-            project_start_date: self.project_start_date,
-            week_to_show: self.week_to_show,
-            tasks: self.tasks.clone(),
+            project_data: self.get_current_project().clone(),
         });
         self.redo_history.clear();
     }
@@ -325,15 +378,9 @@ impl App {
     fn undo(&mut self) {
         if let Some(previous_state) = self.history.pop() {
             self.redo_history.push(ProjectState {
-                project_name: self.project_name.clone(),
-                project_start_date: self.project_start_date,
-                week_to_show: self.week_to_show,
-                tasks: self.tasks.clone(),
+                project_data: self.get_current_project().clone(),
             });
-            self.project_name = previous_state.project_name;
-            self.project_start_date = previous_state.project_start_date;
-            self.week_to_show = previous_state.week_to_show;
-            self.tasks = previous_state.tasks;
+            *self.get_current_project_mut() = previous_state.project_data;
             self.recalculate_schedule();
             self.status_message = "Undo successful.".to_string();
         } else {
@@ -344,34 +391,45 @@ impl App {
     fn redo(&mut self) {
         if let Some(next_state) = self.redo_history.pop() {
             self.history.push(ProjectState {
-                project_name: self.project_name.clone(),
-                project_start_date: self.project_start_date,
-                week_to_show: self.week_to_show,
-                tasks: self.tasks.clone(),
+                project_data: self.get_current_project().clone(),
             });
-            self.project_name = next_state.project_name;
-            self.project_start_date = next_state.project_start_date;
-            self.week_to_show = next_state.week_to_show;
-            self.tasks = next_state.tasks;
+            *self.get_current_project_mut() = next_state.project_data;
             self.recalculate_schedule();
             self.status_message = "Redo successful.".to_string();
         } else {
             self.status_message = "Nothing to redo.".to_string();
         }
     }
+
+    fn next_project(&mut self) {
+        if self.all_projects.projects.len() > 1 {
+            self.save_all_projects().unwrap_or_else(|_| self.status_message = "Failed to save current project before switching.".into());
+            self.current_project_index = (self.current_project_index + 1) % self.all_projects.projects.len();
+            self.status_message = format!("Switched to project: {}", self.get_current_project().project_name);
+            self.recalculate_schedule();
+            self.table_state.select(Some(0));
+        } else {
+            self.status_message = "No other projects to switch to.".to_string();
+        }
+    }
+
+    fn previous_project(&mut self) {
+        if self.all_projects.projects.len() > 1 {
+            self.save_all_projects().unwrap_or_else(|_| self.status_message = "Failed to save current project before switching.".into());
+            self.current_project_index = (self.current_project_index + self.all_projects.projects.len() - 1) % self.all_projects.projects.len();
+            self.status_message = format!("Switched to project: {}", self.get_current_project().project_name);
+            self.recalculate_schedule();
+            self.table_state.select(Some(0));
+        } else {
+            self.status_message = "No other projects to switch to.".to_string();
+        }
+    }
 }
 
 // --- MAIN ---
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let project_file = if args.len() > 1 {
-        Some(args[1].clone())
-    } else {
-        None
-    };
-
     setup_terminal()?;
-    let mut app = App::new(project_file);
+    let mut app = App::new();
     run_app(&mut app)?;
     restore_terminal()?;
     Ok(())
@@ -404,7 +462,7 @@ fn handle_events(app: &mut App) -> io::Result<()> {
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
-            KeyCode::Char('s') => { app.save_project(app.current_file_path.clone()).unwrap_or_else(|_| app.status_message = "Failed to save project.".into()); },
+            KeyCode::Char('s') => { app.save_all_projects().unwrap_or_else(|_| app.status_message = "Failed to save projects.".into()); },
             KeyCode::Char('r') => app.redo(),
             _ => {}
         }
@@ -423,20 +481,25 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') | KeyCode::Right => select_next_field(app),
         KeyCode::Char('a') => {
             app.add_task(Task { id: 0, name: "New Task".into(), assigned_to: "Unassigned".into(), duration: 1, progress: 0, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
-            app.table_state.select(Some(app.tasks.len() - 1));
+            app.table_state.select(Some(app.get_current_project().tasks.len() - 1));
             app.focus_area = FocusArea::Tasks;
         }
         KeyCode::Char('D') => app.delete_selected_task(),
         KeyCode::Char('u') => app.undo(),
         KeyCode::Char('t') => {
-            if app.today < app.project_start_date {
-                app.week_to_show = 0;
+            let today_date = app.today; // Capture app.today before mutable borrow
+            let current_project = app.get_current_project_mut();
+            if today_date < current_project.project_start_date {
+                current_project.week_to_show = 0;
             } else {
-                let days_from_start = (app.today - app.project_start_date).num_days();
-                app.week_to_show = (days_from_start / 7) as u32;
+                let days_from_start = (today_date - current_project.project_start_date).num_days();
+                current_project.week_to_show = (days_from_start / 7) as u32;
             }
             app.status_message = format!("Jumped to the week of today's date.");
         }
+        KeyCode::Char('N') => app.next_project(),
+        KeyCode::Char('P') => app.previous_project(),
+        KeyCode::Char('C') => app.add_new_project(),
         KeyCode::Enter => {
             match app.focus_area {
                 FocusArea::Project(_) => {
@@ -445,8 +508,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 }
                 FocusArea::Tasks => {
                     if let Some(selected_index) = app.table_state.selected() {
+                        let current_project = app.get_current_project();
                         let is_editable = match app.selected_task_field {
-                            TaskField::StartDate => app.tasks[selected_index].dependencies.is_empty(),
+                            TaskField::StartDate => current_project.tasks[selected_index].dependencies.is_empty(),
                             _ => true,
                         };
                         if is_editable {
@@ -513,14 +577,14 @@ fn navigate_down(app: &mut App) {
         FocusArea::Project(ProjectField::Name) => app.focus_area = FocusArea::Project(ProjectField::StartDate),
         FocusArea::Project(ProjectField::StartDate) => app.focus_area = FocusArea::Project(ProjectField::WeekToShow),
         FocusArea::Project(ProjectField::WeekToShow) => {
-            if !app.tasks.is_empty() {
+            if !app.get_current_project().tasks.is_empty() {
                 app.focus_area = FocusArea::Tasks;
                 app.table_state.select(Some(0));
             }
         }
         FocusArea::Tasks => {
             if let Some(selected) = app.table_state.selected() {
-                if selected < app.tasks.len() - 1 {
+                if selected < app.get_current_project().tasks.len() - 1 {
                     app.table_state.select(Some(selected + 1));
                 }
             }
@@ -555,28 +619,29 @@ fn select_previous_field(app: &mut App) {
 }
 
 fn go_to_top(app: &mut App) {
-    if !app.tasks.is_empty() {
+    if !app.get_current_project().tasks.is_empty() {
         app.table_state.select(Some(0));
         app.focus_area = FocusArea::Tasks;
     }
 }
 
 fn go_to_bottom(app: &mut App) {
-    if !app.tasks.is_empty() {
-        let last_index = app.tasks.len() - 1;
+    if !app.get_current_project().tasks.is_empty() {
+        let last_index = app.get_current_project().tasks.len() - 1;
         app.table_state.select(Some(last_index));
         app.focus_area = FocusArea::Tasks;
     }
 }
 
 fn load_buffer_for_editing(app: &mut App) {
+    let current_project = app.get_current_project();
     match app.focus_area {
-        FocusArea::Project(ProjectField::Name) => app.input_buffer = app.project_name.clone(),
-        FocusArea::Project(ProjectField::StartDate) => app.input_buffer = app.project_start_date.format("%m/%d/%Y").to_string(),
-        FocusArea::Project(ProjectField::WeekToShow) => app.input_buffer = app.week_to_show.to_string(),
+        FocusArea::Project(ProjectField::Name) => app.input_buffer = current_project.project_name.clone(),
+        FocusArea::Project(ProjectField::StartDate) => app.input_buffer = current_project.project_start_date.format("%m/%d/%Y").to_string(),
+        FocusArea::Project(ProjectField::WeekToShow) => app.input_buffer = current_project.week_to_show.to_string(),
         FocusArea::Tasks => {
             if let Some(index) = app.table_state.selected() {
-                let task = &app.tasks[index];
+                let task = &current_project.tasks[index];
                 app.input_buffer = match app.selected_task_field {
                     TaskField::Name => task.name.clone(),
                     TaskField::AssignedTo => task.assigned_to.clone(),
@@ -591,32 +656,38 @@ fn load_buffer_for_editing(app: &mut App) {
 }
 
 fn save_buffer_to_task(app: &mut App) {
-    match app.focus_area {
-        FocusArea::Project(ProjectField::Name) => app.project_name = app.input_buffer.clone(),
+    let focus_area = app.focus_area;
+    let selected_task_field = app.selected_task_field;
+    let input_buffer_owned = app.input_buffer.clone(); // Clone input_buffer
+    let selected_table_index = app.table_state.selected(); // Get selected_index before mutable borrow
+
+    let current_project = app.get_current_project_mut();
+    match focus_area {
+        FocusArea::Project(ProjectField::Name) => current_project.project_name = input_buffer_owned.clone(),
         FocusArea::Project(ProjectField::StartDate) => {
-            if let Ok(date) = NaiveDate::parse_from_str(&app.input_buffer, "%m/%d/%Y") {
-                app.project_start_date = date;
+            if let Ok(date) = NaiveDate::parse_from_str(&input_buffer_owned, "%m/%d/%Y") {
+                current_project.project_start_date = date;
             } else {
                 app.status_message = "Invalid date format. Please use mm/dd/yyyy.".to_string();
             }
         }
         FocusArea::Project(ProjectField::WeekToShow) => {
-            if let Ok(week) = app.input_buffer.parse() {
-                app.week_to_show = week;
+            if let Ok(week) = input_buffer_owned.parse() {
+                current_project.week_to_show = week;
             } else {
                 app.status_message = "Invalid number for week.".to_string();
             }
         }
         FocusArea::Tasks => {
-            if let Some(index) = app.table_state.selected() {
-                let task = &mut app.tasks[index];
-                match app.selected_task_field {
-                    TaskField::Name => task.name = app.input_buffer.clone(),
-                    TaskField::AssignedTo => task.assigned_to = app.input_buffer.clone(),
-                    TaskField::Duration => task.duration = app.input_buffer.parse().unwrap_or(task.duration),
-                    TaskField::Progress => task.progress = app.input_buffer.parse().unwrap_or(task.progress).min(100),
+            if let Some(index) = selected_table_index {
+                let task = &mut current_project.tasks[index];
+                match selected_task_field {
+                    TaskField::Name => task.name = input_buffer_owned.clone(),
+                    TaskField::AssignedTo => task.assigned_to = input_buffer_owned.clone(),
+                    TaskField::Duration => task.duration = input_buffer_owned.parse().unwrap_or(task.duration),
+                    TaskField::Progress => task.progress = input_buffer_owned.parse().unwrap_or(task.progress).min(100),
                     TaskField::Dependencies => {
-                        task.dependencies = app.input_buffer.split(',')
+                        task.dependencies = input_buffer_owned.split(',')
                             .filter_map(|s| s.trim().parse().ok())
                             .collect();
                         if !task.dependencies.is_empty() {
@@ -624,9 +695,9 @@ fn save_buffer_to_task(app: &mut App) {
                         }
                     }
                     TaskField::StartDate => {
-                        if app.input_buffer.is_empty() {
+                        if input_buffer_owned.is_empty() {
                             task.manual_start_date = None;
-                        } else if let Ok(date) = NaiveDate::parse_from_str(&app.input_buffer, "%m/%d/%Y") {
+                        } else if let Ok(date) = NaiveDate::parse_from_str(&input_buffer_owned, "%m/%d/%Y") {
                             task.manual_start_date = Some(date);
                             task.dependencies.clear();
                             app.status_message = "Dependencies cleared for task with manual start date.".to_string();
@@ -643,15 +714,16 @@ fn save_buffer_to_task(app: &mut App) {
 // --- UI RENDERING ---
 fn calculate_column_widths(app: &App) -> [u16; 7] {
     const PADDING: u16 = 2;
-    let id_col_width = app.tasks.iter()
+    let current_project = app.get_current_project();
+    let id_col_width = current_project.tasks.iter()
         .map(|t| UnicodeWidthStr::width(t.id.to_string().as_str()))
         .max().unwrap_or(0).max(UnicodeWidthStr::width("ID")) as u16 + PADDING;
 
-    let name_col_width = app.tasks.iter()
+    let name_col_width = current_project.tasks.iter()
         .map(|t| UnicodeWidthStr::width(t.name.as_str()))
         .max().unwrap_or(0).max(UnicodeWidthStr::width("Name")) as u16 + 12 + PADDING;
 
-    let assigned_col_width = app.tasks.iter()
+    let assigned_col_width = current_project.tasks.iter()
         .map(|t| UnicodeWidthStr::width(t.assigned_to.as_str()))
         .max().unwrap_or(0).max(UnicodeWidthStr::width("Assigned")) as u16 + PADDING;
 
@@ -659,7 +731,7 @@ fn calculate_column_widths(app: &App) -> [u16; 7] {
     let dur_col_width = UnicodeWidthStr::width("Dur").max(4) as u16 + PADDING;
     let prog_col_width = UnicodeWidthStr::width("Prog%").max(4) as u16 + PADDING;
     
-    let deps_col_width = app.tasks.iter()
+    let deps_col_width = current_project.tasks.iter()
         .map(|t| {
             if t.dependencies.is_empty() { 0 }
             else {
@@ -758,7 +830,8 @@ fn ui(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[u16; 7]) {
-    let block = Block::default().borders(Borders::ALL).title("Project Details & Tasks");
+    let current_project = app.get_current_project();
+    let block = Block::default().borders(Borders::ALL).title(format!("Project Details & Tasks - {}", current_project.project_name));
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
@@ -777,11 +850,11 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
     let start_date_style = if app.focus_area == FocusArea::Project(ProjectField::StartDate) { Style::default().bg(Color::Blue) } else { Style::default() };
     let week_style = if app.focus_area == FocusArea::Project(ProjectField::WeekToShow) { Style::default().bg(Color::Blue) } else { Style::default() };
     
-    let name_text = if app.focus_area == FocusArea::Project(ProjectField::Name) && app.input_mode == InputMode::Editing { &app.input_buffer } else { &app.project_name };
-    let start_date_text = if app.focus_area == FocusArea::Project(ProjectField::StartDate) && app.input_mode == InputMode::Editing { app.input_buffer.clone() } else { app.project_start_date.format("%m/%d/%Y").to_string() };
-    let week_text = if app.focus_area == FocusArea::Project(ProjectField::WeekToShow) && app.input_mode == InputMode::Editing { app.input_buffer.clone() } else { app.week_to_show.to_string() };
+    let name_text = if app.focus_area == FocusArea::Project(ProjectField::Name) && app.input_mode == InputMode::Editing { &app.input_buffer } else { &current_project.project_name };
+    let start_date_text = if app.focus_area == FocusArea::Project(ProjectField::StartDate) && app.input_mode == InputMode::Editing { app.input_buffer.clone() } else { current_project.project_start_date.format("%m/%d/%Y").to_string() };
+    let week_text = if app.focus_area == FocusArea::Project(ProjectField::WeekToShow) && app.input_mode == InputMode::Editing { app.input_buffer.clone() } else { current_project.week_to_show.to_string() };
 
-    frame.render_widget(Paragraph::new(format!("Project: {}", name_text)).style(name_style), layout[0]);
+    frame.render_widget(Paragraph::new(format!("Project: {} ({}/{})", name_text, app.current_project_index + 1, app.all_projects.projects.len())).style(name_style), layout[0]);
     frame.render_widget(Paragraph::new(format!("Start Date: {}", start_date_text)).style(start_date_style), layout[1]);
     frame.render_widget(Paragraph::new(format!("Week to Show: {}", week_text)).style(week_style), layout[2]);
 
@@ -805,7 +878,7 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
     let header_table = Table::new(vec![header_row], constraints.clone());
     frame.render_widget(header_table, header_area);
 
-    let rows = app.tasks.iter().enumerate().map(|(i, task)| {
+    let rows = current_project.tasks.iter().enumerate().map(|(i, task)| {
         let is_selected_row = app.table_state.selected() == Some(i);
         let is_today_task = task.start_date.map_or(false, |start| {
             task.end_date.map_or(false, |end| app.today >= start && app.today <= end)
@@ -871,7 +944,8 @@ fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
     let content_area = chart_layout[1];
     
     app.gantt_area_width = content_area.width;
-    let min_date = app.project_start_date + Duration::weeks(app.week_to_show as i64);
+    let current_project = app.get_current_project();
+    let min_date = current_project.project_start_date + Duration::weeks(current_project.week_to_show as i64);
     
     const DAY_WIDTH: u16 = 4;
     let date_range_days = (app.gantt_area_width / DAY_WIDTH) as i64;
@@ -914,7 +988,7 @@ fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let mut lines = vec![Line::from(""); 1]; // 1 for header alignment
 
-    for (i, task) in app.tasks.iter().enumerate() {
+    for (i, task) in current_project.tasks.iter().enumerate() {
         let row_style = if app.focus_area == FocusArea::Tasks && app.table_state.selected() == Some(i) { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) };
         let mut bar_spans = vec![];
         if let (Some(start), Some(end)) = (task.start_date, task.end_date) {
@@ -953,7 +1027,7 @@ fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help_text = match app.input_mode {
-        InputMode::Normal => "Nav (j/k/h/l) | Add (a) | Del (D) | Today (t) | Undo (u) | Redo (Ctrl-r) | Edit (Enter) | Save (Ctrl-s) | Quit (q)",
+        InputMode::Normal => "Nav (j/k/h/l) | Add (a) | Del (D) | Today (t) | Undo (u) | Redo (Ctrl-r) | Edit (Enter) | Save (Ctrl-s) | New Project (C) | Next Project (N) | Prev Project (P) | Quit (q)",
         InputMode::Editing => "Editing... (Enter) save | (Esc) cancel | (Ctrl-w) del word",
     };
     
