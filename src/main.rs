@@ -100,7 +100,7 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(project_file: Option<String>) -> Self {
         let mut app = App {
             project_name: "New Project".to_string(),
             tasks: vec![],
@@ -120,11 +120,14 @@ impl App {
             redo_history: vec![],
         };
 
-        if app.load_project().is_err() {
-            app.status_message = "No 'project.json' found. Starting with default tasks.".to_string();
+        let load_result = app.load_project(project_file.clone());
+        if load_result.is_err() {
+            let msg = format!("Failed to load project from {}. Starting with default tasks.", project_file.unwrap_or("project.json".to_string()));
+            app.status_message = msg;
             app.load_default_tasks();
         } else {
-            app.status_message = "Project loaded successfully from 'project.json'.".to_string();
+            let msg = format!("Project loaded successfully from {}.", project_file.unwrap_or("project.json".to_string()));
+            app.status_message = msg;
         }
         
         if !app.tasks.is_empty() {
@@ -270,7 +273,7 @@ impl App {
         }
     }
 
-    fn save_project(&mut self) -> io::Result<()> {
+    fn save_project(&mut self, file_name: Option<String>) -> io::Result<()> {
         let project_data = ProjectData {
             project_name: self.project_name.clone(),
             project_start_date: self.project_start_date,
@@ -278,13 +281,15 @@ impl App {
             tasks: self.tasks.clone(),
         };
         let json_data = serde_json::to_string_pretty(&project_data)?;
-        fs::write("project.json", json_data)?;
-        self.status_message = "Project saved successfully!".to_string();
+        let path = file_name.unwrap_or("project.json".to_string());
+        fs::write(&path, json_data)?;
+        self.status_message = format!("Project saved successfully to {}!", path);
         Ok(())
     }
 
-    fn load_project(&mut self) -> io::Result<()> {
-        let path = Path::new("project.json");
+    fn load_project(&mut self, file_name: Option<String>) -> io::Result<()> {
+        let path_str = file_name.unwrap_or("project.json".to_string());
+        let path = Path::new(&path_str);
         if path.exists() {
             let json_data = fs::read_to_string(path)?;
             let project_data: ProjectData = serde_json::from_str(&json_data)?;
@@ -351,8 +356,15 @@ impl App {
 
 // --- MAIN ---
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let project_file = if args.len() > 1 {
+        Some(args[1].clone())
+    } else {
+        None
+    };
+
     setup_terminal()?;
-    let mut app = App::new();
+    let mut app = App::new(project_file);
     run_app(&mut app)?;
     restore_terminal()?;
     Ok(())
@@ -385,7 +397,7 @@ fn handle_events(app: &mut App) -> io::Result<()> {
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
-            KeyCode::Char('s') => { app.save_project().unwrap_or_else(|_| app.status_message = "Failed to save project.".into()); },
+            KeyCode::Char('s') => { app.save_project(None).unwrap_or_else(|_| app.status_message = "Failed to save project.".into()); },
             KeyCode::Char('r') => app.redo(),
             _ => {}
         }
