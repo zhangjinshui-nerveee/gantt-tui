@@ -1,4 +1,4 @@
-# gantt-tui
+# ganttui (gantt - text user interface)
 
 A terminal user interface (TUI) application for visualizing and managing Gantt charts directly from your command line. This tool aims to provide a lightweight yet powerful way to keep track of project timelines and task dependencies without leaving your terminal.
 
