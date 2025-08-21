@@ -189,20 +189,25 @@ impl App {
         &mut self.all_projects.projects[self.current_project_index]
     }
 
-    fn add_task(&mut self, mut task: Task) {
+    fn add_task(&mut self, mut task: Task) -> usize {
         self.save_state_for_undo();
         let next_id = self.next_task_id;
         task.id = next_id;
 
         let selected_index = self.table_state.selected(); // Get selected_index before mutable borrow
         let current_project = self.get_current_project_mut();
+        let new_task_index;
+
         if let Some(idx) = selected_index {
             current_project.tasks.insert(idx + 1, task);
+            new_task_index = idx + 1;
         } else {
             current_project.tasks.push(task);
+            new_task_index = current_project.tasks.len() - 1;
         }
         // next_task_id is updated in recalculate_schedule
         self.remap_ids_and_dependencies();
+        new_task_index
     }
 
     fn delete_selected_task(&mut self) {
@@ -243,15 +248,15 @@ impl App {
     fn move_task_up(&mut self) {
         if let FocusArea::Tasks = self.focus_area {
             if let Some(selected_index) = self.table_state.selected() {
-                self.save_state_for_undo();
-                let new_selected_index = selected_index - 1;
-                { 
-                    let current_project = self.get_current_project_mut();
-                    if selected_index > 0 {
+                if selected_index > 0 {
+                    self.save_state_for_undo();
+                    let new_selected_index = selected_index - 1;
+                    { 
+                        let current_project = self.get_current_project_mut();
                         current_project.tasks.swap(selected_index, new_selected_index);
-                    }
-                } 
-                self.table_state.select(Some(new_selected_index));
+                    } 
+                    self.table_state.select(Some(new_selected_index));
+                }
                 self.remap_ids_and_dependencies();
             }
         }
@@ -260,16 +265,17 @@ impl App {
     fn move_task_down(&mut self) {
         if let FocusArea::Tasks = self.focus_area {
             if let Some(selected_index) = self.table_state.selected() {
-                self.save_state_for_undo();
-                let new_selected_index = selected_index + 1;
-                { 
-                    let current_project = self.get_current_project_mut();
-                    if selected_index < current_project.tasks.len() - 1 {
+                let current_project_len = self.get_current_project().tasks.len();
+                if selected_index < current_project_len - 1 {
+                    self.save_state_for_undo();
+                    let new_selected_index = selected_index + 1;
+                    { 
+                        let current_project = self.get_current_project_mut();
                         current_project.tasks.swap(selected_index, new_selected_index);
-                    }
-                } 
-                self.table_state.select(Some(new_selected_index));
-                self.remap_ids_and_dependencies();
+                    } 
+                    self.table_state.select(Some(new_selected_index));
+                    self.remap_ids_and_dependencies();
+                }
             }
         }
     }
@@ -479,10 +485,13 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => navigate_up(app),
         KeyCode::Char('h') | KeyCode::Left => select_previous_field(app),
         KeyCode::Char('l') | KeyCode::Right => select_next_field(app),
-        KeyCode::Char('a') => {
-            app.add_task(Task { id: 0, name: "New Task".into(), assigned_to: "Unassigned".into(), duration: 1, progress: 0, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
-            app.table_state.select(Some(app.get_current_project().tasks.len() - 1));
+        KeyCode::Char('a') | KeyCode::Char('o') => {
+            let new_task_index = app.add_task(Task { id: 0, name: "New Task".into(), assigned_to: "Unassigned".into(), duration: 1, progress: 0, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
+            app.table_state.select(Some(new_task_index));
             app.focus_area = FocusArea::Tasks;
+            app.selected_task_field = TaskField::Name;
+            app.input_mode = InputMode::Editing;
+            load_buffer_for_editing(app);
         }
         KeyCode::Char('D') => app.delete_selected_task(),
         KeyCode::Char('u') => app.undo(),
