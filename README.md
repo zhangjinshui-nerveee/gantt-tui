@@ -2,6 +2,8 @@
 
 A terminal user interface (TUI) application for visualizing and managing Gantt charts directly from your command line. This tool aims to provide a lightweight yet powerful way to keep track of project timelines and task dependencies without leaving your terminal.
 
+![gantt_tui](https://github.com/user-attachments/assets/8da888dc-7225-4ffb-a8e2-e09bd414bb67)
+
 ## Features
 
 *   **Interactive Gantt Chart Display**: View tasks and their durations in a clear, interactive timeline.
