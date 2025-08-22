@@ -674,10 +674,13 @@ fn save_buffer_to_task(app: &mut App) {
     match focus_area {
         FocusArea::Project(ProjectField::Name) => current_project.project_name = input_buffer_owned.clone(),
         FocusArea::Project(ProjectField::StartDate) => {
-            if let Ok(date) = NaiveDate::parse_from_str(&input_buffer_owned, "%m/%d/%Y") {
+            if input_buffer_owned.to_lowercase() == "today" {
+                current_project.project_start_date = Local::now().date_naive();
+            }
+            else if let Ok(date) = NaiveDate::parse_from_str(&input_buffer_owned, "%m/%d/%Y") {
                 current_project.project_start_date = date;
             } else {
-                app.status_message = "Invalid date format. Please use mm/dd/yyyy.".to_string();
+                app.status_message = "Invalid date format. Please use mm/dd/yyyy or 'today'.".to_string();
             }
         }
         FocusArea::Project(ProjectField::WeekToShow) => {
@@ -693,7 +696,26 @@ fn save_buffer_to_task(app: &mut App) {
                 match selected_task_field {
                     TaskField::Name => task.name = input_buffer_owned.clone(),
                     TaskField::AssignedTo => task.assigned_to = input_buffer_owned.clone(),
-                    TaskField::Duration => task.duration = input_buffer_owned.parse().unwrap_or(task.duration),
+                    TaskField::Duration => {
+                        let mut duration = task.duration;
+                        let trimmed = input_buffer_owned.trim();
+                        if trimmed.ends_with('w') {
+                            if let Ok(val) = trimmed[..trimmed.len()-1].parse::<i64>() {
+                                duration = val * 7;
+                            }
+                        } else if trimmed.ends_with('m') {
+                            if let Ok(val) = trimmed[..trimmed.len()-1].parse::<i64>() {
+                                duration = val * 30;
+                            }
+                        } else if trimmed.ends_with('y') {
+                            if let Ok(val) = trimmed[..trimmed.len()-1].parse::<i64>() {
+                                duration = val * 365;
+                            }
+                        } else if let Ok(val) = trimmed.parse::<i64>() {
+                            duration = val;
+                        }
+                        task.duration = duration;
+                    },
                     TaskField::Progress => task.progress = input_buffer_owned.parse().unwrap_or(task.progress).min(100),
                     TaskField::Dependencies => {
                         task.dependencies = input_buffer_owned.split(',')
@@ -706,12 +728,16 @@ fn save_buffer_to_task(app: &mut App) {
                     TaskField::StartDate => {
                         if input_buffer_owned.is_empty() {
                             task.manual_start_date = None;
+                        } else if input_buffer_owned.to_lowercase() == "today" {
+                            task.manual_start_date = Some(Local::now().date_naive());
+                            task.dependencies.clear();
+                            app.status_message = "Dependencies cleared for task with manual start date.".to_string();
                         } else if let Ok(date) = NaiveDate::parse_from_str(&input_buffer_owned, "%m/%d/%Y") {
                             task.manual_start_date = Some(date);
                             task.dependencies.clear();
                             app.status_message = "Dependencies cleared for task with manual start date.".to_string();
                         } else {
-                            app.status_message = "Invalid date format. Please use mm/dd/yyyy.".to_string();
+                            app.status_message = "Invalid date format. Please use mm/dd/yyyy or 'today'.".to_string();
                         }
                     }
                 }
