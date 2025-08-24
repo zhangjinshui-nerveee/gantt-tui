@@ -1030,7 +1030,15 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
             false
         };
 
-        let row_style = match app.highlight_mode {
+        let is_overdue = if let Some(end) = task.end_date {
+            app.today > end && task.progress < 100
+        } else {
+            false
+        };
+
+        let row_style = if is_overdue {
+            Style::default().fg(Color::Red)
+        } else { match app.highlight_mode {
             HighlightMode::Today => {
                 if is_today_task {
                     Style::default().fg(Color::Rgb(173, 216, 230))
@@ -1045,7 +1053,7 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
                     Style::default()
                 }
             }
-        };
+        }};
 
         let deps_str = task.dependencies.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
         
