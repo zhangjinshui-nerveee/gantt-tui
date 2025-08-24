@@ -27,6 +27,7 @@ struct Task {
     progress: u8,
     dependencies: Vec<u32>,
     manual_start_date: Option<NaiveDate>,
+    details: Option<String>,
     #[serde(skip)]
     start_date: Option<NaiveDate>,
     #[serde(skip)]
@@ -83,6 +84,12 @@ enum FocusArea {
     Tasks,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum HighlightMode {
+    Today,
+    Urgent,
+}
+
 struct App {
     all_projects: AllProjectsData,
     current_project_index: usize,
@@ -99,7 +106,9 @@ struct App {
     history: Vec<ProjectState>,
     redo_history: Vec<ProjectState>,
     current_file_path: String, // Always "projects.json"
-
+    details_view_open: bool,
+    details_buffer: String,
+    highlight_mode: HighlightMode,
 }
 
 impl App {
@@ -123,6 +132,9 @@ impl App {
             history: vec![],
             redo_history: vec![],
             current_file_path: "projects.json".to_string(),
+            details_view_open: false,
+            details_buffer: String::new(),
+            highlight_mode: HighlightMode::Today,
         };
 
         let load_result = app.load_all_projects();
@@ -153,8 +165,8 @@ impl App {
             week_to_show: 0,
             tasks: vec![],
         };
-        default_project.tasks.push(Task { id: 0, name: "Requirement Gathering".into(), assigned_to: "Alice".into(), duration: 5, progress: 100, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
-        default_project.tasks.push(Task { id: 0, name: "UI/UX Design".into(), assigned_to: "Bob".into(), duration: 7, progress: 50, dependencies: vec![1], manual_start_date: None, start_date: None, end_date: None });
+        default_project.tasks.push(Task { id: 0, name: "Requirement Gathering".into(), assigned_to: "Alice".into(), duration: 5, progress: 100, dependencies: vec![], manual_start_date: None, details: None, start_date: None, end_date: None });
+        default_project.tasks.push(Task { id: 0, name: "UI/UX Design".into(), assigned_to: "Bob".into(), duration: 7, progress: 50, dependencies: vec![1], manual_start_date: None, details: None, start_date: None, end_date: None });
         
         self.all_projects.projects.push(default_project);
         self.current_project_index = self.all_projects.projects.len() - 1;
@@ -486,7 +498,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('h') | KeyCode::Left => select_previous_field(app),
         KeyCode::Char('l') | KeyCode::Right => select_next_field(app),
         KeyCode::Char('a') | KeyCode::Char('o') => {
-            let new_task_index = app.add_task(Task { id: 0, name: "New Task".into(), assigned_to: "Unassigned".into(), duration: 1, progress: 0, dependencies: vec![], manual_start_date: None, start_date: None, end_date: None });
+            let new_task_index = app.add_task(Task { id: 0, name: "New Task".into(), assigned_to: "Unassigned".into(), duration: 1, progress: 0, dependencies: vec![], manual_start_date: None, details: None, start_date: None, end_date: None });
             app.table_state.select(Some(new_task_index));
             app.focus_area = FocusArea::Tasks;
             app.selected_task_field = TaskField::Name;
@@ -509,6 +521,27 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('N') => app.next_project(),
         KeyCode::Char('P') => app.previous_project(),
         KeyCode::Char('C') => app.add_new_project(),
+        KeyCode::Char('M') => {
+            if let Some(selected_index) = app.table_state.selected() {
+                app.details_view_open = !app.details_view_open;
+                if app.details_view_open {
+                    let task = &app.get_current_project().tasks[selected_index];
+                    app.details_buffer = task.details.clone().unwrap_or_default();
+                    app.input_mode = InputMode::Editing;
+                } else {
+                    let buffer = app.details_buffer.clone();
+                    let task = &mut app.get_current_project_mut().tasks[selected_index];
+                    task.details = if buffer.is_empty() { None } else { Some(buffer) };
+                    app.input_mode = InputMode::Normal;
+                }
+            }
+        },
+        KeyCode::Char('O') => {
+            app.highlight_mode = match app.highlight_mode {
+                HighlightMode::Today => HighlightMode::Urgent,
+                HighlightMode::Urgent => HighlightMode::Today,
+            };
+        },
         KeyCode::Enter => {
             match app.focus_area {
                 FocusArea::Project(_) => {
@@ -537,6 +570,37 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_editing_mode(app: &mut App, key: KeyEvent) {
+    if app.details_view_open {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(selected_index) = app.table_state.selected() {
+                    let buffer = app.details_buffer.clone();
+                    let task = &mut app.get_current_project_mut().tasks[selected_index];
+                    task.details = if buffer.is_empty() { None } else { Some(buffer) };
+                }
+                app.details_view_open = false;
+                app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Esc => {
+                app.details_view_open = false;
+                app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
+                app.details_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                app.details_buffer.pop();
+            }
+            KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {
+                let buffer = &mut app.details_buffer;
+                let last_word_start = buffer.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                buffer.truncate(last_word_start);
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {
             let buffer = &mut app.input_buffer;
@@ -781,17 +845,33 @@ fn calculate_column_widths(app: &App) -> [u16; 7] {
 
 // --- UI RENDERING ---
 fn ui(frame: &mut Frame, app: &mut App) {
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(frame.area());
+    let main_layout = if app.details_view_open {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(5), // Details view height
+                Constraint::Length(3), // Footer height
+            ])
+            .split(frame.area())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(frame.area())
+    };
 
-    let total_width = frame.area().width;
+    let content_area = main_layout[0];
+    let footer_area = if app.details_view_open { main_layout[2] } else { main_layout[1] };
+    let details_area = if app.details_view_open { Some(main_layout[1]) } else { None };
+
+
+    let total_width = content_area.width;
     let min_right_width = (total_width as f32 * 0.3) as u16;
 
     let column_widths = calculate_column_widths(app);
     let ideal_left_width: u16 = column_widths.iter().sum();
-    
+
     let mut left_width = ideal_left_width;
     if total_width.saturating_sub(left_width) < min_right_width {
         left_width = total_width.saturating_sub(min_right_width);
@@ -800,64 +880,78 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(left_width), Constraint::Min(0)])
-        .split(main_layout[0]);
+        .split(content_area);
 
     let table_area = main_chunks[0];
     render_task_table(frame, table_area, app, &column_widths);
     render_gantt_chart(frame, main_chunks[1], app);
-    render_footer(frame, main_layout[1], app);
+
+    if let Some(details_area) = details_area {
+        render_details_view(frame, details_area, app);
+    }
+
+    render_footer(frame, footer_area, app);
 
     if let InputMode::Editing = app.input_mode {
-        match app.focus_area {
-            FocusArea::Project(field) => {
-                let y_offset = match field {
-                    ProjectField::Name => 1,
-                    ProjectField::StartDate => 2,
-                    ProjectField::WeekToShow => 3,
-                };
-                let x_offset = match field {
-                    ProjectField::Name => "Project: ".len(),
-                    ProjectField::StartDate => "Start Date: ".len(),
-                    ProjectField::WeekToShow => "Week to Show: ".len(),
-                };
-                frame.set_cursor_position(
-                    (table_area.x + 1 + (x_offset + app.input_buffer.len()) as u16,
-                    table_area.y + y_offset),
-                );
+        if app.details_view_open {
+            if let Some(details_area) = details_area {
+                 frame.set_cursor_position((
+                    details_area.x + 1 + (app.details_buffer.len() as u16 % (details_area.width - 2)),
+                    details_area.y + 1 + (app.details_buffer.len() as u16 / (details_area.width - 2)),
+                ));
             }
-            FocusArea::Tasks => {
-                if let Some(selected_row_index) = app.table_state.selected() {
-                    let block = Block::default().borders(Borders::ALL);
-                    let inner_area = block.inner(table_area);
-                    let layout = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Length(1),
-                            Constraint::Length(1),
-                            Constraint::Length(1),
-                            Constraint::Min(0),
-                        ])
-                        .split(inner_area);
-                    let tasks_area = layout[4];
+        } else {
+            match app.focus_area {
+                FocusArea::Project(field) => {
+                    let y_offset = match field {
+                        ProjectField::Name => 1,
+                        ProjectField::StartDate => 2,
+                        ProjectField::WeekToShow => 3,
+                    };
+                    let x_offset = match field {
+                        ProjectField::Name => "Project: ".len(),
+                        ProjectField::StartDate => "Start Date: ".len(),
+                        ProjectField::WeekToShow => "Week to Show: ".len(),
+                    };
+                    frame.set_cursor_position(
+                        (table_area.x + 1 + (x_offset + app.input_buffer.len()) as u16,
+                        table_area.y + y_offset),
+                    );
+                }
+                FocusArea::Tasks => {
+                    if let Some(selected_row_index) = app.table_state.selected() {
+                        let block = Block::default().borders(Borders::ALL);
+                        let inner_area = block.inner(table_area);
+                        let layout = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([
+                                Constraint::Length(1),
+                                Constraint::Length(1),
+                                Constraint::Length(1),
+                                Constraint::Length(1),
+                                Constraint::Min(0),
+                            ])
+                            .split(inner_area);
+                        let tasks_area = layout[4];
 
-                    let col_constraints: Vec<Constraint> = column_widths.iter().map(|w| Constraint::Length(*w)).collect();
-                    let col_layout = Layout::default().direction(Direction::Horizontal).constraints(col_constraints).split(tasks_area);
+                        let col_constraints: Vec<Constraint> = column_widths.iter().map(|w| Constraint::Length(*w)).collect();
+                        let col_layout = Layout::default().direction(Direction::Horizontal).constraints(col_constraints).split(tasks_area);
 
-                    let selected_col_index = app.selected_task_field as usize + 1;
-                    let selected_col_rect = col_layout[selected_col_index];
+                        let selected_col_index = app.selected_task_field as usize + 1;
+                        let selected_col_rect = col_layout[selected_col_index];
 
-                    let mut cursor_x = selected_col_rect.x + "> ".len() as u16 + app.input_buffer.len() as u16;
-                    match app.selected_task_field {
-                        TaskField::Name => cursor_x += 1,
-                        TaskField::AssignedTo => cursor_x -= 4,
-                        TaskField::StartDate => cursor_x -= 3,
-                        TaskField::Duration => cursor_x -= 2,
-                        TaskField::Progress => cursor_x -= 1,
-                        _ => {}
+                        let mut cursor_x = selected_col_rect.x + "> ".len() as u16 + app.input_buffer.len() as u16;
+                        match app.selected_task_field {
+                            TaskField::Name => cursor_x += 1,
+                            TaskField::AssignedTo => cursor_x -= 4,
+                            TaskField::StartDate => cursor_x -= 3,
+                            TaskField::Duration => cursor_x -= 2,
+                            TaskField::Progress => cursor_x -= 1,
+                            _ => {}
+                        }
+                        let cursor_y = tasks_area.y + selected_row_index as u16;
+                        frame.set_cursor_position((cursor_x, cursor_y));
                     }
-                    let cursor_y = tasks_area.y + selected_row_index as u16;
-                    frame.set_cursor_position((cursor_x, cursor_y));
                 }
             }
         }
@@ -919,9 +1013,47 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
             task.end_date.map_or(false, |end| app.today >= start && app.today <= end)
         });
 
+        let is_urgent = if let (Some(start), Some(end)) = (task.start_date, task.end_date) {
+            if app.today >= start && app.today <= end {
+                let days_from_start = (app.today - start).num_days() + 1; // Add 1 to include the start day
+                let total_duration = (end - start).num_days() + 1;
+                if total_duration > 0 {
+                    let expected_progress = (days_from_start as f32 / total_duration as f32 * 100.0) as u8;
+                    task.progress < expected_progress
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let row_style = match app.highlight_mode {
+            HighlightMode::Today => {
+                if is_today_task {
+                    Style::default().fg(Color::Rgb(173, 216, 230))
+                } else {
+                    Style::default()
+                }
+            }
+            HighlightMode::Urgent => {
+                if is_urgent {
+                    Style::default().fg(Color::Rgb(255, 165, 0)) // Orange for urgent
+                } else {
+                    Style::default()
+                }
+            }
+        };
+
         let deps_str = task.dependencies.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
         
-        let id_cell = Cell::from(format!(" {}", task.id));
+        let id_cell = if task.details.is_some() {
+            Cell::from(format!(" {}*", task.id))
+        } else {
+            Cell::from(format!(" {}", task.id))
+        };
 
         let cells_data = vec![
             (TaskField::Name, task.name.clone()),
@@ -954,12 +1086,6 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
         let mut all_cells = vec![id_cell];
         all_cells.append(&mut other_cells);
 
-        let row_style = if is_today_task {
-            Style::default().fg(Color::Rgb(173, 216, 230))
-        } else {
-            Style::default()
-        };
-
         Row::new(all_cells).style(row_style)
     });
 
@@ -967,6 +1093,18 @@ fn render_task_table(frame: &mut Frame, area: Rect, app: &App, column_widths: &[
         .row_highlight_style(Style::default().bg(Color::Rgb(50, 50, 50)).add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, tasks_area, &mut app.table_state.clone());
+}
+
+fn render_details_view(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default().title("Task Details").borders(Borders::ALL);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = app.details_buffer.clone();
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(paragraph, inner_area);
 }
 
 fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -1062,13 +1200,13 @@ fn render_gantt_chart(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help_text = match app.input_mode {
-        InputMode::Normal => "Nav (j/k/h/l) | Add (a) | Del (D) | Today (t) | Undo (u) | Redo (Ctrl-r) | Edit (Enter) | Save (Ctrl-s) | New Project (C) | Next Project (N) | Prev Project (P) | Quit (q)",
+        InputMode::Normal => "Nav (j/k/h/l) | A(dd) | D(el) | (t)oday | (u)ndo | (Ctrl-r)edo | (M)ore | (Ctrl-s)ave | (C)reat/(N)ext/(P)revious Project | (q)uit",
         InputMode::Editing => "Editing... (Enter) save | (Esc) cancel | (Ctrl-w) del word",
     };
     
-    let layout = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let layout = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     frame.render_widget(Paragraph::new(app.status_message.clone()).alignment(Alignment::Left), layout[0]);
-    frame.render_widget(Paragraph::new(help_text).alignment(Alignment::Right), layout[1]);
+    frame.render_widget(Paragraph::new(help_text).alignment(Alignment::Right).wrap(Wrap { trim: true }), layout[1]);
 }
 
 // --- TERMINAL SETUP & RESTORATION ---

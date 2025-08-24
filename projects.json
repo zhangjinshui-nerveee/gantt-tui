@@ -1,0 +1,38 @@
+{
+  "projects": [
+    {
+      "project_name": "New Project",
+      "project_start_date": "2024-08-01",
+      "week_to_show": 0,
+      "tasks": [
+        {
+          "id": 1,
+          "name": "Requirement Gathering",
+          "assigned_to": "Alice",
+          "duration": 5,
+          "progress": 100,
+          "dependencies": [],
+          "manual_start_date": null,
+          "details": null
+        },
+        {
+          "id": 2,
+          "name": "UI/UX Design",
+          "assigned_to": "Bob",
+          "duration": 7,
+          "progress": 50,
+          "dependencies": [],
+          "manual_start_date": null,
+          "details": null
+        }
+      ]
+    },
+    {
+      "project_name": "New Project 2",
+      "project_start_date": "2025-08-24",
+      "week_to_show": 0,
+      "tasks": []
+    }
+  ],
+  "active_project_index": 1
+}
